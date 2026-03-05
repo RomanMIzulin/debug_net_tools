@@ -30,6 +30,13 @@ func NewFrame(opcode uint8, payload []byte, direction Direction) *Frame {
 
 type SessionState int
 
+type Message struct {
+	Frames []Frame
+	ID uuid.UUID
+	Text string
+	Bytes []byte // want to join all bytes from all frames?
+}
+
 const (
 	StateCreated SessionState = iota
 	StateConnecting
