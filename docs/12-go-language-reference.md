@@ -1,6 +1,42 @@
 # Go Language Reference (from go.dev/ref/spec)
 
 Quick reference ordered from most frequently needed to least.
+Each section: syntax first, then tricks / gotchas / best practices.
+
+## Table of Contents
+
+1. [Slices](#1-slices) — create, append, copy, slice expressions, tricks, shared backing array
+2. [Maps](#2-maps) — create, read, delete, set idiom, counting, grouping, nil map trap
+3. [Strings](#3-strings) — immutable bytes, rune iteration, Builder, split, trim
+4. [Error Handling](#4-error-handling) — wrap/unwrap, sentinel errors, custom types, Is/As
+5. [Goroutines & Channels](#5-goroutines--channels) — channels, select, errgroup, fan-out, context, sync
+6. [Control Flow](#6-control-flow) — for/range, if-init, switch, labels, shadow variables
+7. [Structs](#7-structs) — embedding, tags, functional options, field padding
+8. [Interfaces](#8-interfaces) — type assertions, type switches, nil interface trap
+9. [Functions](#9-functions) — closures, defer, panic/recover, defer-in-loop trap
+10. [Methods](#10-methods) — value vs pointer receiver, method expressions
+11. [Type Declarations & Conversions](#11-type-declarations--conversions)
+12. [Generics](#12-generics-go-118) — constraints, type inference
+13. [Constants & Iota](#13-constants--iota) — bitmask, skip, stringer
+14. [Operators & Precedence](#14-operators--precedence)
+15. [Built-in Functions Summary](#15-built-in-functions-summary)
+16. [Pointers](#16-pointers)
+17. [Arrays](#17-arrays)
+18. [Composite Literals](#18-composite-literals-short-forms)
+19. [Package & Import](#19-package--import) — init functions
+20. [Blank Identifier](#20-blank-identifier)
+21. [Numeric Types Quick Ref](#21-numeric-types-quick-ref)
+22. [Literal Syntax](#22-literal-syntax)
+23. [Assignability & Comparability](#23-assignability--comparability)
+24. [Zero Values](#24-zero-values)
+
+**Cross-cutting:**
+
+25. [Performance Tips](#25-performance-tips) — pre-alloc, sync.Pool, unsafe string
+26. [Testing Patterns](#26-testing-patterns) — table-driven, parallel, fuzz, benchmark
+27. [Useful Idioms](#27-useful-idioms) — comma-ok, Must, goroutine exit
+28. [go vet / Linter Catches](#28-go-vet--linter-catches-worth-knowing)
+29. [Standard Library Gems](#29-standard-library-gems) — cmp, slog, iter, timers, HTTP 1.22
 
 ---
 
@@ -35,7 +71,63 @@ cap(s)
 clear(s)
 ```
 
-**Gotcha**: `s[low:high]` shares underlying array with `s`. Mutations via one are visible in the other until `append` triggers reallocation.
+### Slice tricks
+
+```go
+// Pre-allocate when size is known (avoids ~10 reallocations for 1000 items)
+s := make([]T, 0, expectedSize)
+for ... {
+    s = append(s, item)
+}
+
+// Filter in-place (no allocation)
+n := 0
+for _, v := range s {
+    if keep(v) {
+        s[n] = v
+        n++
+    }
+}
+s = s[:n]
+
+// Remove element at index i (order preserved)
+s = append(s[:i], s[i+1:]...)
+
+// Remove element at index i (order NOT preserved, faster)
+s[i] = s[len(s)-1]
+s = s[:len(s)-1]
+
+// Clone (independent copy)
+clone := slices.Clone(s)          // Go 1.21+
+
+// Sort / reverse / deduplicate
+slices.Sort(s)                    // Go 1.21+, for ordered types
+slices.SortFunc(s, func(a, b T) int { return cmp.Compare(a.Field, b.Field) })
+slices.Reverse(s)
+slices.Compact(s)                 // deduplicate sorted
+slices.Insert(s, i, elem)        // insert at index
+
+// Contains / search
+slices.Contains(s, v)
+slices.Index(s, v)
+slices.BinarySearch(s, v)
+```
+
+### Slice gotchas
+
+**Shared backing array**: `s[low:high]` shares underlying array with `s`. Mutations via one are visible in the other until `append` triggers reallocation.
+
+```go
+a := make([]int, 3, 5)           // len=3, cap=5
+b := append(a, 4)                // len=4, cap=5 — shares array with a!
+b[0] = 99                        // a[0] is also 99
+
+c := append(a, 4, 5, 6)          // exceeds cap -> new array
+c[0] = 99                        // a[0] unchanged
+
+// Safe: force new allocation with full slice expression
+b := append(a[:len(a):len(a)], 4) // cap=len, so append always allocates
+```
 
 ---
 
@@ -45,7 +137,7 @@ clear(s)
 // Create
 m := map[string]int{"a": 1, "b": 2}
 m := make(map[string]int)
-m := make(map[string]int, hint)   // capacity hint
+m := make(map[string]int, hint)   // capacity hint (reduces rehashing)
 
 // Read (zero value if missing)
 v := m[key]
@@ -56,7 +148,7 @@ m[key] = value
 delete(m, key)                    // no-op if key absent
 clear(m)                          // remove all entries
 
-// Iterate (random order each time)
+// Iterate (random order each time — by design)
 for k, v := range m { }
 for k := range m { }
 
@@ -64,7 +156,44 @@ for k := range m { }
 len(m)
 ```
 
-**Maps are NOT safe for concurrent use** — use `sync.Map` or protect with `sync.Mutex`.
+### Map tricks
+
+```go
+// Set (unique collection) — struct{} uses 0 bytes
+seen := make(map[string]struct{})
+seen[key] = struct{}{}
+if _, ok := seen[key]; ok { /* exists */ }
+
+// Counting (zero value of int is 0)
+counts := make(map[string]int)
+counts[word]++
+
+// Grouping (nil slice append works)
+groups := make(map[string][]Item)
+groups[key] = append(groups[key], item)
+
+// maps package (Go 1.21+)
+keys := maps.Keys(m)
+vals := maps.Values(m)
+maps.Clone(m)                    // shallow copy
+maps.Equal(m1, m2)
+maps.DeleteFunc(m, pred)
+
+// Deterministic iteration — sort keys
+keys := slices.Sorted(maps.Keys(m))
+for _, k := range keys { fmt.Println(k, m[k]) }
+```
+
+### Map gotchas
+
+- **NOT safe for concurrent use** — use `sync.Map` or protect with `sync.Mutex`.
+- **nil map reads OK, writes panic**:
+
+```go
+var m1 map[string]int             // nil — m1["x"] returns 0, but m1["x"] = 1 panics!
+m2 := map[string]int{}           // non-nil empty — safe for reads AND writes
+m3 := make(map[string]int)       // same as m2
+```
 
 ---
 
@@ -75,7 +204,7 @@ len(m)
 s := "hello"
 len(s)                            // byte count, NOT rune count
 s[i]                              // byte at index (uint8)
-s[1:3]                            // substring (byte slice, shares nothing)
+s[1:3]                            // substring
 
 // Iterate by runes
 for i, r := range s { }          // i = byte offset, r = rune
@@ -89,6 +218,40 @@ string(65)                        // rune -> string: "A"
 
 // Concatenation
 s = "hello" + " " + "world"
+```
+
+### String tricks
+
+```go
+// Efficient concatenation (many strings) — ~3x faster than + for >5 strings
+var b strings.Builder
+b.Grow(estimatedSize)            // optional pre-alloc
+for _, s := range parts {
+    b.WriteString(s)
+}
+result := b.String()
+
+// Join from slice
+result := strings.Join(parts, ", ")
+
+// Common operations (avoid regex for these)
+strings.HasPrefix(s, "http://")
+strings.HasSuffix(s, ".go")
+strings.Contains(s, "needle")
+strings.TrimSpace(s)
+strings.TrimPrefix(s, "v")       // "v1.2" -> "1.2"; no-op if no prefix
+
+// Split
+parts := strings.Split("a,b,c", ",")     // ["a", "b", "c"]
+parts := strings.SplitN("a,b,c", ",", 2) // ["a", "b,c"]
+parts := strings.Fields("  a  b  c  ")    // ["a", "b", "c"] by whitespace
+
+// Rune count (NOT len)
+utf8.RuneCountInString(s)
+
+// strconv is faster than fmt for simple conversions
+strconv.Itoa(42)                  // faster than fmt.Sprintf("%d", 42)
+strconv.FormatFloat(3.14, 'f', 2, 64)
 ```
 
 ---
@@ -123,6 +286,47 @@ errors.As(err, &target)           // extract typed error
 if pe, ok := err.(*os.PathError); ok {
     fmt.Println(pe.Path)
 }
+```
+
+### Error best practices
+
+```go
+// Sentinel errors — for errors.Is checks
+var ErrNotFound = errors.New("not found")
+var ErrTimeout  = errors.New("timeout")
+
+if errors.Is(err, ErrNotFound) { /* handle */ }
+
+// Custom error type — for errors.As + extra context
+type ValidationError struct {
+    Field   string
+    Message string
+}
+func (e *ValidationError) Error() string {
+    return fmt.Sprintf("%s: %s", e.Field, e.Message)
+}
+
+var ve *ValidationError
+if errors.As(err, &ve) {
+    fmt.Println(ve.Field)
+}
+
+// ALWAYS add context when propagating
+if err != nil {
+    return fmt.Errorf("open config %s: %w", path, err)
+}
+
+// %w vs %v
+fmt.Errorf("...: %w", err)       // wraps (Is/As traverse)
+fmt.Errorf("...: %v", err)       // formats (chain broken, use when hiding impl details)
+
+// Multiple errors (Go 1.20+)
+err = errors.Join(err1, err2, err3)
+
+// DON'T
+if err.Error() == "not found" { }    // fragile string comparison
+panic(err)                            // don't panic in library code
+_ = f()                              // don't ignore errors silently
 ```
 
 ---
@@ -172,6 +376,147 @@ default:
 
 If multiple cases ready — one is chosen **pseudo-randomly**.
 Without `default` — blocks until a case is ready.
+
+### Goroutine patterns
+
+```go
+// errgroup — run N goroutines, collect first error, cancel rest
+g, ctx := errgroup.WithContext(ctx)
+for _, url := range urls {
+    g.Go(func() error {
+        return fetch(ctx, url)
+    })
+}
+if err := g.Wait(); err != nil { /* first error */ }
+
+// Worker pool with semaphore
+sem := make(chan struct{}, maxWorkers)
+for _, task := range tasks {
+    sem <- struct{}{}             // acquire slot
+    go func() {
+        defer func() { <-sem }()  // release slot
+        process(task)
+    }()
+}
+
+// Fan-out / fan-in
+results := make(chan Result, len(jobs))
+for _, job := range jobs {
+    go func() { results <- process(job) }()
+}
+for range jobs {
+    r := <-results                // collect
+}
+
+// Done channel (signal completion)
+done := make(chan struct{})
+go func() {
+    defer close(done)
+    // work...
+}()
+<-done
+
+// Non-blocking send/receive
+select {
+case ch <- v:
+default:                          // channel full, drop
+}
+
+// Merge channels (fan-in)
+func merge[T any](channels ...<-chan T) <-chan T {
+    out := make(chan T)
+    var wg sync.WaitGroup
+    for _, ch := range channels {
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            for v := range ch { out <- v }
+        }()
+    }
+    go func() { wg.Wait(); close(out) }()
+    return out
+}
+
+// Rate limiter
+limiter := time.NewTicker(100 * time.Millisecond)
+defer limiter.Stop()
+for req := range requests {
+    <-limiter.C
+    go handle(req)
+}
+```
+
+**Leak prevention**: every goroutine must have a guaranteed exit path. If it reads from a channel, ensure that channel will be closed or context cancelled.
+
+### Context
+
+```go
+// ALWAYS pass context as first parameter
+func DoWork(ctx context.Context, arg string) error { }
+
+// NEVER store context in struct
+type Bad struct { ctx context.Context }  // anti-pattern
+
+// ALWAYS defer cancel
+ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+defer cancel()
+
+// Check cancellation in long loops
+for i := range items {
+    select {
+    case <-ctx.Done():
+        return ctx.Err()
+    default:
+    }
+    process(items[i])
+}
+
+// Context values (sparingly — request-scoped data only)
+type ctxKey struct{}               // unexported type prevents collision
+ctx = context.WithValue(ctx, ctxKey{}, value)
+v := ctx.Value(ctxKey{})
+
+// Cause (Go 1.20+)
+ctx, cancel := context.WithCancelCause(parent)
+cancel(fmt.Errorf("shutdown requested"))
+context.Cause(ctx)                // "shutdown requested"
+```
+
+### sync Primitives
+
+```go
+// Mutex
+var mu sync.Mutex
+mu.Lock()
+defer mu.Unlock()
+
+// RWMutex (multiple readers, single writer)
+var rw sync.RWMutex
+rw.RLock(); defer rw.RUnlock()    // shared read
+rw.Lock();  defer rw.Unlock()     // exclusive write
+
+// Once (guaranteed single execution)
+var once sync.Once
+once.Do(func() { /* expensive init */ })
+
+// WaitGroup
+var wg sync.WaitGroup
+for range 5 {
+    wg.Add(1)
+    go func() {
+        defer wg.Done()
+        work()
+    }()
+}
+wg.Wait()
+
+// Atomic operations (lock-free)
+var counter atomic.Int64
+counter.Add(1)
+counter.Load()
+counter.Store(0)
+counter.CompareAndSwap(old, new)
+```
 
 ---
 
@@ -247,6 +592,38 @@ for i := range rows {
 }
 ```
 
+### Control flow gotchas
+
+**Shadow variables** — `:=` in inner scope creates a NEW variable:
+
+```go
+x := 1
+if true {
+    x := 2                        // new x, shadows outer!
+    fmt.Println(x)                // 2
+}
+fmt.Println(x)                    // 1 (unchanged)
+
+// Especially dangerous with err
+err := firstCall()
+if err == nil {
+    result, err := secondCall()   // this err is NEW, doesn't update outer
+    _ = result
+}
+// outer err is still from firstCall
+```
+
+**Loop variable capture** (fixed in Go 1.22+, but know it):
+
+```go
+// Pre-1.22: all goroutines share same `v`
+for _, v := range values {
+    go func() { fmt.Println(v) }() // BUG: all print last value
+}
+// Fix (pre-1.22): v := v inside loop
+// Go 1.22+: each iteration gets its own variable
+```
+
 ---
 
 ## 7. Structs
@@ -277,6 +654,55 @@ type User struct {
 
 // Anonymous struct
 v := struct{ X, Y int }{1, 2}
+```
+
+### Struct best practices
+
+```go
+// Functional options pattern (flexible constructors)
+type Option func(*Server)
+
+func WithPort(port int) Option {
+    return func(s *Server) { s.port = port }
+}
+func WithTimeout(d time.Duration) Option {
+    return func(s *Server) { s.timeout = d }
+}
+
+func NewServer(opts ...Option) *Server {
+    s := &Server{port: 8080, timeout: 30 * time.Second}
+    for _, opt := range opts {
+        opt(s)
+    }
+    return s
+}
+// Usage: NewServer(WithPort(9090), WithTimeout(5*time.Second))
+
+// Prevent unkeyed literals (force named fields in external packages)
+type Config struct {
+    Host string
+    Port int
+    _    struct{}                  // can't use Config{"localhost", 8080}
+}
+
+// Comparable structs work with ==
+type Point struct { X, Y int }
+p1 == p2                          // field-by-field comparison
+
+// Method on embedded type — outer method shadows promoted one
+type Base struct{}
+func (Base) Greet() string { return "hello" }
+
+type Extended struct{ Base }
+func (Extended) Greet() string { return "hi" }  // shadows Base.Greet
+
+// Struct field ordering (reduce padding)
+// BAD (24 bytes):                GOOD (16 bytes):
+type Bad struct {                 type Good struct {
+    a bool    // 1+7 pad              b int64   // 8
+    b int64   // 8                     c int32   // 4
+    c int32   // 4+4 pad              a bool    // 1+3 pad
+}                                 }
 ```
 
 ---
@@ -310,7 +736,52 @@ default:
 ```
 
 **Interfaces are satisfied implicitly** — no `implements` keyword.
-A type satisfies an interface if it has all the methods.
+
+### Interface best practices
+
+```go
+// Accept interfaces, return structs
+func Process(r io.Reader) (*Result, error) { }  // good
+func Process(r io.Reader) (io.Writer, error) { } // bad: hides concrete type
+
+// Keep interfaces small (1-3 methods)
+type Stringer interface { String() string }
+
+// Define interfaces where they're USED, not where they're implemented
+// package consumer:
+type Storage interface { Get(id string) (Item, error) }
+// package impl:
+type SQLStorage struct { ... }    // satisfies Storage without knowing about it
+
+// Compile-time interface satisfaction check
+var _ Storage = (*SQLStorage)(nil)
+
+// io.Reader composition (decorator pattern)
+r := io.LimitReader(r, 1024)     // reads at most 1024 bytes
+r = io.TeeReader(r, &buf)        // copies to buf while reading
+```
+
+### Interface gotcha: nil pointer vs nil interface
+
+```go
+type MyError struct{ msg string }
+func (e *MyError) Error() string { return e.msg }
+
+func mayFail() error {
+    var e *MyError = nil
+    return e                      // returns non-nil interface!
+}
+err := mayFail()
+err == nil                        // FALSE — interface{type: *MyError, value: nil}
+
+// Fix: return bare nil
+func mayFail() error {
+    if failed {
+        return &MyError{"boom"}
+    }
+    return nil                    // bare nil, not typed nil
+}
+```
 
 ---
 
@@ -364,6 +835,25 @@ defer fmt.Println(x)             // prints 1 even if x changes later
 // Common: cleanup
 f, _ := os.Open(path)
 defer f.Close()
+```
+
+### Defer gotcha: defer in loop
+
+```go
+// BAD: defers pile up until function returns
+for _, f := range files {
+    fd, _ := os.Open(f)
+    defer fd.Close()              // won't close until function ends!
+}
+
+// FIX: wrap in closure
+for _, f := range files {
+    func() {
+        fd, _ := os.Open(f)
+        defer fd.Close()          // closes at end of each iteration
+        // process fd
+    }()
+}
 ```
 
 ### Panic / Recover
@@ -493,10 +983,24 @@ const (
 )
 ```
 
+### Constants trick
+
 **Untyped constants** have arbitrary precision and adapt to context:
 ```go
 const x = 1 << 100               // valid (huge number)
 var f float64 = x                 // used as float64
+```
+
+**Enum with String()** — use `stringer` tool:
+```go
+//go:generate stringer -type=Direction
+type Direction int
+const (
+    North Direction = iota
+    South
+    East
+    West
+)
 ```
 
 ---
@@ -549,10 +1053,8 @@ x = i++                           // compile error
 | `panic(v)` | Trigger panic |
 | `recover()` | Catch panic (in defer only) |
 | `complex(r, i)` | Construct complex number |
-| `real(c)` | Real part of complex |
-| `imag(c)` | Imaginary part of complex |
-| `print(...)` | Low-level print to stderr |
-| `println(...)` | Low-level println to stderr |
+| `real(c)` / `imag(c)` | Real / imaginary part |
+| `print` / `println` | Low-level print to stderr |
 
 ---
 
@@ -728,3 +1230,189 @@ uintptr  large enough to hold any pointer
 | `interface` | `nil` |
 | `struct` | all fields zero |
 | `array` | all elements zero |
+
+---
+---
+
+# Cross-cutting: Performance, Testing, Idioms
+
+---
+
+## 25. Performance Tips
+
+```go
+// Pre-allocate slices
+s := make([]T, 0, n)
+
+// Pre-size maps
+m := make(map[K]V, n)
+
+// strings.Builder for concatenation (see section 3)
+
+// sync.Pool for frequently allocated objects
+var bufPool = sync.Pool{
+    New: func() any { return new(bytes.Buffer) },
+}
+buf := bufPool.Get().(*bytes.Buffer)
+buf.Reset()
+// use buf
+bufPool.Put(buf)
+
+// Avoid allocations in hot paths
+// BAD:  fmt.Sprintf("%s:%d", host, port)  — allocates
+// GOOD: host + ":" + strconv.Itoa(port)   — less allocation
+
+// []byte to string without copy (read-only, unsafe — only after profiling)
+import "unsafe"
+s := unsafe.String(&b[0], len(b))
+```
+
+---
+
+## 26. Testing Patterns
+
+```go
+// Table-driven tests
+func TestAdd(t *testing.T) {
+    tests := []struct {
+        name     string
+        a, b     int
+        expected int
+    }{
+        {"positive", 1, 2, 3},
+        {"negative", -1, -2, -3},
+        {"zero", 0, 0, 0},
+    }
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            got := Add(tt.a, tt.b)
+            if got != tt.expected {
+                t.Errorf("Add(%d, %d) = %d, want %d", tt.a, tt.b, got, tt.expected)
+            }
+        })
+    }
+}
+
+// Parallel tests
+t.Run("case", func(t *testing.T) {
+    t.Parallel()
+    // test body
+})
+
+// Test helpers
+func setupDB(t *testing.T) *DB {
+    t.Helper()                    // errors report caller's line
+    db := openTestDB()
+    t.Cleanup(func() { db.Close() })
+    return db
+}
+
+// Temporary directory
+dir := t.TempDir()                // auto-cleaned after test
+
+// Skip slow tests
+if testing.Short() { t.Skip("skipping slow test") }
+
+// Benchmark (Go 1.24+)
+func BenchmarkFoo(b *testing.B) {
+    for b.Loop() { Foo() }        // replaces for i := 0; i < b.N; i++
+}
+
+// Fuzz testing (Go 1.18+)
+func FuzzReverse(f *testing.F) {
+    f.Add("hello")
+    f.Fuzz(func(t *testing.T, s string) {
+        if s != Reverse(Reverse(s)) {
+            t.Errorf("double reverse mismatch")
+        }
+    })
+}
+```
+
+---
+
+## 27. Useful Idioms
+
+```go
+// Comma-ok for everything
+v, ok := m[key]                   // map
+v, ok := x.(T)                   // type assertion
+v, ok := <-ch                    // channel receive
+
+// Must pattern (panic on error — only for init/global)
+var re = regexp.MustCompile(`^\d+$`)
+var tmpl = template.Must(template.ParseFiles("index.html"))
+
+// Ensure goroutine exits (ctx + select)
+go func(ctx context.Context) {
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        case item := <-work:
+            handle(item)
+        }
+    }
+}(ctx)
+
+// Type switch on error
+switch err := err.(type) {
+case nil:
+case *os.PathError:
+    fmt.Println(err.Path)
+case *net.OpError:
+    fmt.Println(err.Op)
+}
+```
+
+---
+
+## 28. `go vet` / Linter Catches Worth Knowing
+
+```go
+fmt.Printf("%d", "string")       // vet: wrong format type
+mu2 := mu                        // vet: copies lock value (sync.Mutex)
+return x; fmt.Println("never")   // vet: unreachable code
+
+type T struct {
+    X int `json: "x"`            // vet: space after colon in tag
+    Y int `json:"y" json:"z"`    // vet: duplicate tag key
+}
+
+x = x                            // vet: self-assignment
+```
+
+---
+
+## 29. Standard Library Gems
+
+```go
+// cmp (Go 1.21+)
+cmp.Compare(a, b)                 // -1, 0, 1
+cmp.Or(a, b, c)                   // first non-zero value (like || for values)
+
+// slog (Go 1.21+) — structured logging
+slog.Info("request", "method", r.Method, "path", r.URL.Path)
+slog.Error("failed", "err", err, "attempt", n)
+logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
+// iter (Go 1.23+) — iterator protocol
+func All[T any](s []T) iter.Seq2[int, T] { ... }
+
+// Timers — ALWAYS stop when done
+timer := time.NewTimer(5 * time.Second)
+defer timer.Stop()
+select {
+case <-timer.C:                   // expired
+case <-done:                      // cancelled
+}
+
+// Ticker
+ticker := time.NewTicker(1 * time.Second)
+defer ticker.Stop()
+for t := range ticker.C { /* runs every second */ }
+
+// HTTP handler patterns (Go 1.22+)
+mux := http.NewServeMux()
+mux.HandleFunc("GET /api/users/{id}", handler) // method + path params
+```
