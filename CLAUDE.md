@@ -33,6 +33,7 @@ The project follows Go's `internal/` convention with two packages so far:
 - **Fan-out pub/sub via Go channels** for distributing events to consumers (TUI, file writer, etc.). Each subscriber gets its own channel. File writer is part of core (not a subscriber) to guarantee persistence.
 - **SQLite** as primary storage (not JSONL) — better for multi-session queries and historical data. JSONL may be used for export.
 - **Two proxy modes planned**: passive capture (record only) and interactive proxy (can inject/edit frames).
+- **`context.Context` propagation** — all operations that cross goroutine or I/O boundaries must accept `ctx context.Context` as the first parameter (see docs/14-context-package.md). Root context is created in `main()` via `signal.NotifyContext` for graceful shutdown. Store methods use `*Context` variants of `database/sql` (`QueryRowContext`, `ExecContext`). Relay goroutines use context for cascading cancellation when one side disconnects.
 
 ### Planned Components (implementation order)
 
@@ -59,3 +60,4 @@ Use `golangci-lint` with `exhaustive` and `gochecksumtype` enabled — critical 
 
 - Use English for all code comments and docstrings.
 - `SessionState` and `Direction` use iota enums — always handle all cases exhaustively in switches.
+- `context.Context` is always the first parameter in functions that perform I/O, call the database, or span goroutines. Never store context in structs. Always `defer cancel()` after `WithCancel`/`WithTimeout`.
